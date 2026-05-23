@@ -89,7 +89,6 @@ static NSData *twab_spoofGQLBody(NSData *body, NSURL *url) {
     }
 
     NSString *platform = [NSUUID UUID].UUIDString;
-    BOOL spoofed = NO;
 
     void (^processOp)(NSMutableDictionary *) = ^(NSMutableDictionary *op) {
         if (![op isKindOfClass:NSMutableDictionary.class]) return;
@@ -151,12 +150,10 @@ static NSData *twab_spoofGQLBody(NSData *body, NSURL *url) {
 
     if ([json isKindOfClass:NSMutableDictionary.class]) {
         processOp(json);
-        spoofed = YES;
     } else if ([json isKindOfClass:NSMutableArray.class]) {
         for (id op in (NSMutableArray *)json) {
             processOp(op);
         }
-        spoofed = YES;
     }
 
     NSData *modifiedData = [NSJSONSerialization dataWithJSONObject:json options:0 error:&error];
