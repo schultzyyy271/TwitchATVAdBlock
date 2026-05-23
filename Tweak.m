@@ -190,7 +190,6 @@ static NSURLSessionDataTask *hooked_dataTaskWithRequestCompletion(
 #pragma mark - RCTHTTPRequestHandler Hook
 
 static void hooked_didReceiveData(id self, SEL _cmd, id session, id dataTask, NSData *data) {
-    NSURL *url = [[dataTask currentRequest] URL] ?: [[dataTask originalRequest] URL];
     NSData *filtered = twab_filterResponseBody(data, [dataTask currentRequest]);
     ((void (*)(id, SEL, id, id, NSData *))_orig_didReceiveData)(
         self, _cmd, session, dataTask, filtered);
