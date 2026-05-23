@@ -1,0 +1,9 @@
+Package: com.twab.twitchadblock
+Name: TwitchAdBlock
+Version: 1.0.0
+Architecture: appletvos-arm64
+Description: Blocks ads in Twitch tvOS app
+Maintainer: TwitchAdBlock
+Author: TwitchAdBlock
+Section: Tweaks
+Depends: mobilesubstrate
