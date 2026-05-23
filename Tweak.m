@@ -27,6 +27,11 @@ static NSArray<NSString *> *twab_proxyList(void) {
             @"https://lb-eu3.cdn-perfprod.com",
             @"https://lb-na.cdn-perfprod.com",
             @"https://api.ttv.lol",
+            @"https://eu.luminous.dev",
+            @"https://eu2.luminous.dev",
+            @"https://as.luminous.dev",
+            @"https://twitch.zzls.xyz",
+            @"https://twitch.nadeko.net",
         ];
     });
     return proxies;
