@@ -2,6 +2,8 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
+#define PROXY_URL @"https://lb-eu.cdn-perfprod.com"
+
 static IMP _orig_setHTTPBody = NULL;
 static IMP _orig_dataTaskWithRequest = NULL;
 static IMP _orig_dataTaskWithRequestCompletion = NULL;
@@ -13,6 +15,35 @@ static BOOL swizzleMethod(Class cls, SEL sel, IMP newImp, IMP *outOrig) {
     if (outOrig) *outOrig = method_getImplementation(m);
     method_setImplementation(m, newImp);
     return YES;
+}
+
+#pragma mark - Proxy URL Rewriting
+
+static NSURL *twab_proxyURL(NSURL *originalURL) {
+    if (!originalURL || ![originalURL.host isEqualToString:@"usher.ttvnw.net"]) return nil;
+
+    NSURL *proxyBase = [NSURL URLWithString:PROXY_URL];
+    if (!proxyBase) return nil;
+
+    // Check if proxy is Luminous v1
+    __block BOOL isV1 = NO;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    NSURL *pingURL = [proxyBase URLByAppendingPathComponent:@"ping"];
+    [[NSURLSession.sharedSession dataTaskWithRequest:[NSURLRequest requestWithURL:pingURL]
+        completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+            isV1 = [r isKindOfClass:NSHTTPURLResponse.class] &&
+                   ((NSHTTPURLResponse *)r).statusCode == 200;
+            dispatch_semaphore_signal(sem);
+        }] resume];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 500000000));
+
+    if (!isV1) return nil;
+
+    BOOL isVOD = [originalURL.path.pathComponents[1] isEqualToString:@"vod"];
+    NSString *item = [originalURL.lastPathComponent stringByDeletingPathExtension];
+    NSString *type = isVOD ? @"vod" : @"playlist";
+
+    return [[proxyBase URLByAppendingPathComponent:type] URLByAppendingPathComponent:item];
 }
 
 #pragma mark - GQL Platform Spoofing
@@ -88,24 +119,52 @@ static void hooked_setHTTPBody(id self, SEL _cmd, NSData *body) {
 }
 
 static NSURLSessionDataTask *hooked_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request) {
+    // GQL body spoofing
     if (request.HTTPBody && [request isKindOfClass:NSMutableURLRequest.class]) {
         NSData *spoofed = twab_spoofGQLBody(request.HTTPBody, request.URL);
         if (spoofed != request.HTTPBody) {
             ((NSMutableURLRequest *)request).HTTPBody = spoofed;
         }
     }
+
+    // Proxy redirect for usher.ttvnw.net
+    if ([request.URL.host isEqualToString:@"usher.ttvnw.net"]) {
+        NSURL *proxied = twab_proxyURL(request.URL);
+        if (proxied && [request isKindOfClass:NSMutableURLRequest.class]) {
+            ((NSMutableURLRequest *)request).URL = proxied;
+        } else if (proxied) {
+            NSMutableURLRequest *mutableReq = request.mutableCopy;
+            mutableReq.URL = proxied;
+            request = mutableReq;
+        }
+    }
+
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *))_orig_dataTaskWithRequest)(self, _cmd, request);
 }
 
 static NSURLSessionDataTask *hooked_dataTaskWithRequestCompletion(
     id self, SEL _cmd, NSURLRequest *request,
     void (^completionHandler)(NSData *, NSURLResponse *, NSError *)) {
+    // GQL body spoofing
     if (request.HTTPBody && [request isKindOfClass:NSMutableURLRequest.class]) {
         NSData *spoofed = twab_spoofGQLBody(request.HTTPBody, request.URL);
         if (spoofed != request.HTTPBody) {
             ((NSMutableURLRequest *)request).HTTPBody = spoofed;
         }
     }
+
+    // Proxy redirect for usher.ttvnw.net
+    if ([request.URL.host isEqualToString:@"usher.ttvnw.net"]) {
+        NSURL *proxied = twab_proxyURL(request.URL);
+        if (proxied && [request isKindOfClass:NSMutableURLRequest.class]) {
+            ((NSMutableURLRequest *)request).URL = proxied;
+        } else if (proxied) {
+            NSMutableURLRequest *mutableReq = request.mutableCopy;
+            mutableReq.URL = proxied;
+            request = mutableReq;
+        }
+    }
+
     return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, id))_orig_dataTaskWithRequestCompletion)(
         self, _cmd, request, completionHandler);
 }
