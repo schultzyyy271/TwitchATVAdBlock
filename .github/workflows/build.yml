@@ -1,0 +1,55 @@
+name: Build TwitchAdBlock
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Tweak
+    runs-on: macos-latest
+    env:
+      THEOS: ${{ github.workspace }}/theos
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install ldid xz make
+
+      - name: Cache Theos
+        id: cache-theos
+        uses: actions/cache@v4
+        with:
+          path: theos
+          key: ${{ runner.os }}-theos-v3
+
+      - name: Install Theos
+        if: steps.cache-theos.outputs.cache-hit != 'true'
+        run: |
+          git clone --recursive https://github.com/theos/theos.git $THEOS
+
+      - name: Install SDKs
+        if: steps.cache-theos.outputs.cache-hit != 'true'
+        run: |
+          curl -L https://github.com/theos/sdks/archive/master.zip -o sdks.zip
+          TMP=$(mktemp -d)
+          unzip sdks.zip -d $TMP
+          mv $TMP/sdks-master/*.sdk $THEOS/sdks/
+          rm -rf sdks.zip $TMP
+
+      - name: Build package
+        run: |
+          export PATH="$(brew --prefix)/bin:$PATH"
+          make package FINALPACKAGE=1
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TwitchAdBlock-deb
+          path: packages/*.deb
