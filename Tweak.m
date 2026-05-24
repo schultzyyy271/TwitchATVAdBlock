@@ -37,6 +37,50 @@ static NSArray<NSString *> *twab_proxyList(void) {
     return proxies;
 }
 
+// Cache the fastest working proxy so we don't ping every time
+static NSString *_cachedProxy = nil;
+
+static void twab_clearProxyCache(void) {
+    _cachedProxy = nil;
+}
+
+static NSURL *twab_buildProxyURL(NSString *proxyStr, NSString *type, NSString *item) {
+    NSURL *base = [NSURL URLWithString:proxyStr];
+    if (!base) return nil;
+    return [[base URLByAppendingPathComponent:type] URLByAppendingPathComponent:item];
+}
+
+static NSURL *twab_findProxy(NSString *type, NSString *item) {
+    NSArray *proxies = twab_proxyList();
+    __block NSString *winner = nil;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+    for (NSString *proxyStr in proxies) {
+        NSURL *proxyBase = [NSURL URLWithString:proxyStr];
+        if (!proxyBase) continue;
+
+        NSURL *pingURL = [proxyBase URLByAppendingPathComponent:@"ping"];
+        [[NSURLSession.sharedSession dataTaskWithRequest:[NSURLRequest requestWithURL:pingURL]
+            completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+                if (!winner &&
+                    [r isKindOfClass:NSHTTPURLResponse.class] &&
+                    ((NSHTTPURLResponse *)r).statusCode == 200) {
+                    winner = proxyStr;
+                    dispatch_semaphore_signal(sem);
+                }
+            }] resume];
+    }
+
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 800000000));
+
+    if (winner) {
+        _cachedProxy = winner;
+        return twab_buildProxyURL(winner, type, item);
+    }
+
+    return nil;
+}
+
 static NSURL *twab_proxyURL(NSURL *originalURL) {
     if (!originalURL || ![originalURL.host isEqualToString:@"usher.ttvnw.net"]) return nil;
 
@@ -44,27 +88,25 @@ static NSURL *twab_proxyURL(NSURL *originalURL) {
     NSString *item = [originalURL.lastPathComponent stringByDeletingPathExtension];
     NSString *type = isVOD ? @"vod" : @"playlist";
 
-    for (NSString *proxyStr in twab_proxyList()) {
-        NSURL *proxyBase = [NSURL URLWithString:proxyStr];
-        if (!proxyBase) continue;
-
-        __block BOOL isUp = NO;
-        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-        NSURL *pingURL = [proxyBase URLByAppendingPathComponent:@"ping"];
-        [[NSURLSession.sharedSession dataTaskWithRequest:[NSURLRequest requestWithURL:pingURL]
-            completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-                isUp = [r isKindOfClass:NSHTTPURLResponse.class] &&
-                       ((NSHTTPURLResponse *)r).statusCode == 200;
-                dispatch_semaphore_signal(sem);
-            }] resume];
-        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 400000000));
-
-        if (isUp) {
-            return [[proxyBase URLByAppendingPathComponent:type] URLByAppendingPathComponent:item];
-        }
+    // Use cached proxy if available
+    if (_cachedProxy) {
+        return twab_buildProxyURL(_cachedProxy, type, item);
     }
 
-    return nil;
+    return twab_findProxy(type, item);
+}
+
+// Called when a proxied request fails — clears cache and retries
+static NSURL *twab_proxyURLRetry(NSURL *originalURL) {
+    twab_clearProxyCache();
+
+    if (!originalURL || ![originalURL.host isEqualToString:@"usher.ttvnw.net"]) return nil;
+
+    BOOL isVOD = [originalURL.path.pathComponents[1] isEqualToString:@"vod"];
+    NSString *item = [originalURL.lastPathComponent stringByDeletingPathExtension];
+    NSString *type = isVOD ? @"vod" : @"playlist";
+
+    return twab_findProxy(type, item);
 }
 
 #pragma mark - GQL Platform Spoofing
@@ -174,15 +216,38 @@ static NSURLSessionDataTask *hooked_dataTaskWithRequestCompletion(
     }
 
     if ([request.URL.host isEqualToString:@"usher.ttvnw.net"]) {
+        NSURL *originalUsherURL = request.URL;
         NSURL *proxied = twab_proxyURL(request.URL);
         if (proxied) {
-            if ([request isKindOfClass:NSMutableURLRequest.class]) {
-                ((NSMutableURLRequest *)request).URL = proxied;
-            } else {
-                NSMutableURLRequest *m = request.mutableCopy;
-                m.URL = proxied;
-                request = m;
-            }
+            NSMutableURLRequest *proxyReq = request.mutableCopy;
+            proxyReq.URL = proxied;
+
+            // Wrap completion to retry with different proxy on failure
+            void (^originalHandler)(NSData *, NSURLResponse *, NSError *) = completionHandler;
+            void (^retryHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+                NSInteger statusCode = [response isKindOfClass:NSHTTPURLResponse.class]
+                    ? ((NSHTTPURLResponse *)response).statusCode : 0;
+
+                if (error || statusCode >= 400) {
+                    // Cached proxy failed — clear and try another
+                    NSURL *retry = twab_proxyURLRetry(originalUsherURL);
+                    if (retry) {
+                        NSMutableURLRequest *retryReq = proxyReq.mutableCopy;
+                        retryReq.URL = retry;
+                        [((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, id))_orig_dataTaskWithRequestCompletion)(
+                            self, _cmd, retryReq, originalHandler) resume];
+                    } else {
+                        // All proxies dead — fall back to original URL
+                        [((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, id))_orig_dataTaskWithRequestCompletion)(
+                            self, _cmd, request, originalHandler) resume];
+                    }
+                } else {
+                    originalHandler(data, response, error);
+                }
+            };
+
+            return ((NSURLSessionDataTask *(*)(id, SEL, NSURLRequest *, id))_orig_dataTaskWithRequestCompletion)(
+                self, _cmd, proxyReq, retryHandler);
         }
     }
 
